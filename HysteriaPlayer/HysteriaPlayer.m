@@ -274,13 +274,13 @@ static dispatch_once_t onceToken;
     [self willPlayPlayerItemAtIndex:startAt];
     [self.audioPlayer pause];
     [self.audioPlayer removeAllItems];
-    BOOL findInPlayerItems = NO;
-    findInPlayerItems = [self findSourceInPlayerItems:startAt];
-    if (!findInPlayerItems) {
-        [self getSourceURLAtIndex:startAt preBuffer:NO];
-    } else if (self.audioPlayer.currentItem.status == AVPlayerStatusReadyToPlay) {
-        [self.audioPlayer play];
-    }
+    [self findSourceInPlayerItems:startAt completion:^(BOOL findItems) {
+        if (!findItems) {
+            [self getSourceURLAtIndex:startAt preBuffer:NO];
+        } else if (self.audioPlayer.currentItem.status == AVPlayerItemStatusReadyToPlay) {
+            [self.audioPlayer play];
+        }
+    }];
 }
 
 - (NSInteger)hysteriaPlayerItemsCount
@@ -309,19 +309,31 @@ static dispatch_once_t onceToken;
 
 - (void)setupPlayerItemWithUrl:(NSURL *)url index:(NSInteger)index
 {
-    AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
-    if (!item)
-        return;
-    
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self setHysteriaIndex:item key:[NSNumber numberWithInteger:index]];
-        if (self.isMemoryCached) {
-            NSMutableArray *playerItems = [NSMutableArray arrayWithArray:self.playerItems];
-            [playerItems addObject:item];
-            self.playerItems = playerItems;
+    NSArray *keys = @[@"playable"];
+    AVURLAsset *asset = [[AVURLAsset alloc] initWithURL:url options:nil];
+    AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+    [asset loadValuesAsynchronouslyForKeys:keys completionHandler:^{
+        
+        if ([asset statusOfValueForKey:@"playable" error:nil] == AVKeyValueStatusLoaded) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self setHysteriaIndex:item key:[NSNumber numberWithInteger:index]];
+                if (self.isMemoryCached) {
+                    NSMutableArray *playerItems = [NSMutableArray arrayWithArray:self.playerItems];
+                    [playerItems addObject:item];
+                    self.playerItems = playerItems;
+                }
+                if ([self getLastItemIndex] == index) {
+                    [self insertPlayerItem:item];
+                }
+            });
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if ([self.delegate respondsToSelector:@selector(hysteriaPlayerDidFailed:error:)]) {
+                    [self.delegate hysteriaPlayerDidFailed:HysteriaPlayerFailedCurrentItem error:nil];
+                }
+            });
         }
-        [self insertPlayerItem:item];
-    });
+    }];
 }
 
 
@@ -332,7 +344,9 @@ static dispatch_once_t onceToken;
         if (checkIndex == index) {
             if (item.status == AVPlayerItemStatusReadyToPlay) {
                 [item seekToTime:kCMTimeZero completionHandler:^(BOOL finished) {
-                    [self insertPlayerItem:item];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self insertPlayerItem:item];
+                    });
                 }];
                 return YES;
             }
@@ -341,12 +355,35 @@ static dispatch_once_t onceToken;
     return NO;
 }
 
+- (void)findSourceInPlayerItems:(NSInteger)index completion:(void (^ __nullable)(BOOL findItems))completion
+{
+    for (AVPlayerItem *item in self.playerItems) {
+        NSInteger checkIndex = [[self getHysteriaIndex:item] integerValue];
+        if (checkIndex == index) {
+            if (item.status == AVPlayerItemStatusReadyToPlay) {
+                [item seekToTime:kCMTimeZero completionHandler:^(BOOL finished) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self insertPlayerItem:item];
+                        if (completion) {
+                            completion(YES);
+                        }
+                        return;
+                    });
+                }];
+            }
+        }
+    }
+    if (completion) {
+        completion(NO);
+    }
+}
+
 - (void)prepareNextPlayerItem
 {
     if (_shuffleMode == HysteriaPlayerShuffleModeOn || _repeatMode == HysteriaPlayerRepeatModeOnce) {
         return;
     }
-
+    
     NSInteger nowIndex = self.lastItemIndex;
     BOOL findInPlayerItems = NO;
     NSInteger itemsCount = [self hysteriaPlayerItemsCount];
@@ -355,13 +392,20 @@ static dispatch_once_t onceToken;
         findInPlayerItems = [self findSourceInPlayerItems:nowIndex + 1];
         
         if (!findInPlayerItems) {
-            [self getSourceURLAtIndex:nowIndex + 1 preBuffer:YES];
+            NSInteger next = nowIndex + 1;
+            if ([self.datasource respondsToSelector:@selector(hysteriaPlayerAsyncGetNextSongFromCurrentIndex:)]) {
+                next = [self.datasource hysteriaPlayerAsyncGetNextSongFromCurrentIndex:nowIndex];
+            }
+            [self getSourceURLAtIndex:next preBuffer:YES];
         }
     }
 }
 
 - (void)insertPlayerItem:(AVPlayerItem *)item
 {
+    if (!item) {
+        return;
+    }
     if ([self.audioPlayer.items count] > 1) {
         for (int i = 1 ; i < [self.audioPlayer.items count] ; i ++) {
             [self.audioPlayer removeItem:[self.audioPlayer.items objectAtIndex:i]];
@@ -518,7 +562,11 @@ static dispatch_once_t onceToken;
         NSInteger nowIndex = nowIndexNumber ? [nowIndexNumber integerValue] : self.lastItemIndex;
         if (nowIndex + 1 < [self hysteriaPlayerItemsCount]) {
             if (self.audioPlayer.items.count > 1) {
-                [self willPlayPlayerItemAtIndex:nowIndex + 1];
+                NSInteger next = nowIndex + 1;
+                if ([self.datasource respondsToSelector:@selector(hysteriaPlayerAsyncGetNextSongFromCurrentIndex:)]) {
+                    next = [self.datasource hysteriaPlayerAsyncGetNextSongFromCurrentIndex:nowIndex];
+                }
+                [self willPlayPlayerItemAtIndex:next];
                 [self.audioPlayer advanceToNextItem];
             } else {
                 [self fetchAndPlayPlayerItem:(nowIndex + 1)];
@@ -544,7 +592,10 @@ static dispatch_once_t onceToken;
         if (_repeatMode == HysteriaPlayerRepeatModeOn) {
             [self fetchAndPlayPlayerItem:[self hysteriaPlayerItemsCount] - 1];
         } else {
-            [self.audioPlayer.currentItem seekToTime:kCMTimeZero];
+            [self pause];
+            [self.audioPlayer.currentItem seekToTime:kCMTimeZero completionHandler:^(BOOL finished) {
+                [self play];
+            }];
         }
     } else {
         [self fetchAndPlayPlayerItem:(nowIndex - 1)];

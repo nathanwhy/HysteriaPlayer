@@ -87,6 +87,15 @@ typedef NS_ENUM(NSInteger, HysteriaPlayerFailed) {
  */
 - (void)hysteriaPlayerAsyncSetUrlForItemAtIndex:(NSInteger)index preBuffer:(BOOL)preBuffer;
 
+/**
+ *  Get index of next item. It is aimed to play cache only.
+ *
+ *  @param currentIndex    index of the current item
+ *
+ *  @return index of next item
+ */
+- (NSInteger)hysteriaPlayerAsyncGetNextSongFromCurrentIndex:(NSInteger)currentIndex;
+
 @end
 
 typedef void (^ Failed)(HysteriaPlayerFailed identifier, NSError *error) DEPRECATED_MSG_ATTRIBUTE("deprecated since 2.5 version");
